@@ -1,0 +1,25 @@
+# Ignorer le dossier des dépendances Node.js
+node_modules/
+
+# Ignorer les environnements virtuels Python
+venv/
+*.venv/
+.env
+
+# Ignorer les fichiers de cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignorer les fichiers Git
+.git
+.gitignore
+
+# Ignorer les fichiers de configuration d'IDE
+.vscode/
+.idea/
+
+# Fichiers de build Docker
+Dockerfile
+.dockerignore

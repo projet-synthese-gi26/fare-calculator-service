@@ -1,0 +1,8 @@
+node_modules/
+node_modules
+.next
+venv/
+mon_env/
+__pycache__
+rien.__pycache__
+*.csv

@@ -1,0 +1,2164 @@
+# Contexte du Projet Flask : fare-calculator
+Généré le : Mon 03 Nov 2025 06:03:04 AM WAT
+
+## Arborescence du projet
+```
+.
+├── docs
+│   ├── generate-context-guide.md
+│   ├── tudo-deploy-render.md
+│   ├── tuto-deploy-docker.md
+│   └── tutu-run-docker.md
+├── api.py
+├── app.py
+├── Dockerfile
+├── driver_data.csv
+├── driver_data.pkl
+├── drivers.pkl
+├── gunicorn.conf.py
+├── passenger_data.csv
+├── passenger_data.pkl
+├── passengers.pkl
+├── Procfile
+├── random_forests.pkl
+├── readme.md
+├── requirements.txt
+├── rien.py
+├── test_pickle.py
+└── utils.py
+
+1 directory, 21 files
+```
+
+## Fichiers Clés et Config
+
+### Fichier : `requirements.txt`
+```txt
+attrs==25.1.0
+blinker==1.9.0
+certifi==2024.12.14
+charset-normalizer==3.4.1
+click==8.1.8
+flasgger==0.9.7.1
+Flask==3.1.0
+Flask-Cors==5.0.0
+geographiclib==2.0
+geopy==2.4.1
+gunicorn==23.0.0
+idna==3.10
+itsdangerous==2.2.0
+Jinja2==3.1.5
+joblib==1.4.2
+jsonschema==4.23.0
+jsonschema-specifications==2024.10.1
+MarkupSafe==3.0.2
+mistune==3.1.1
+numpy==2.2.2
+packaging==24.2
+pandas==2.2.3
+python-dateutil==2.9.0.post0
+pytz==2024.2
+PyYAML==6.0.2
+referencing==0.36.2
+requests==2.32.3
+rpds-py==0.22.3
+scikit-learn==1.5.2
+scipy==1.15.1
+six==1.17.0
+threadpoolctl==3.5.0
+typing_extensions==4.12.2
+tzdata==2025.1
+urllib3==2.3.0
+Werkzeug==3.1.3
+```
+
+### Fichier : `app.py`
+```python
+import uuid
+from flask import Flask, request, jsonify
+from flasgger import Swagger
+from utils import *
+import os
+import hashlib
+import time
+from flask_cors import CORS, cross_origin
+
+
+port = int(os.environ.get("PORT", 5000))
+
+DRIVERS_FILE = 'drivers.pkl'
+PASSENGERS_FILE = 'passengers.pkl'
+
+# Initialiser Flask
+app = Flask(__name__)
+Swagger(app)
+CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://rideandgo.vercel.app"]}})
+
+@app.route('/docs')
+@cross_origin()
+def swagger_ui():
+    return redirect('/apidocs/') 
+
+
+@app.route("/", methods=["GET"])
+@cross_origin()
+def welcome():
+    """ACCUEIL"""
+    return jsonify({"message": "Bienvenue sur l'api de recommandation des clients et chauffeurs pour l'application Ride and go."}), 200
+
+# Stockage temporaire des tokens
+active_sessions = {}
+
+@app.route('/register', methods=['POST'])
+@cross_origin()
+def register():
+    """
+    Inscription d'un nouvel utilisateur.
+    ---
+    tags:
+      - Authentification
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - username
+            - email
+            - password
+            - phone_number
+            - first_name
+            - last_name
+            - birthdate
+            - sex
+            - role
+          properties:
+            username:
+              type: string
+              example: "johndoe"
+            email:
+              type: string
+              example: "john@example.com"
+            password:
+              type: string
+              example: "password123"
+            phone_number:
+              type: string
+              example: "+237691234567"
+            first_name:
+              type: string
+              example: "John"
+            last_name:
+              type: string
+              example: "Doe"
+            birthdate:
+              type: string
+              example: "1995-06-15"
+            sex:
+              type: string
+              enum: ["M", "F"]
+              example: "M"
+            role:
+              type: string
+              enum: ["driver", "passenger"]
+              example: "driver"
+    responses:
+      200:
+        description: Utilisateur enregistré avec succès
+      400:
+        description: Erreur dans les données fournies
+    """
+    data = request.get_json()
+    role = data.get("role")
+
+    if role not in ["driver", "passenger"]:
+        return jsonify({"message": "Rôle invalide !"}), 400
+
+    file_path = DRIVERS_FILE if role == "driver" else PASSENGERS_FILE
+    users = load_data(file_path)
+
+    if data["username"] in users:
+        return jsonify({"message": "Cet utilisateur existe déjà"}), 400
+
+    hashed_password = hashlib.sha256(data["password"].encode()).hexdigest()
+
+    user = {
+        "personal_info": {
+            "username": data["username"],
+            "email": data["email"],
+            "password": hashed_password,
+            "phone_number": data["phone_number"],
+            "first_name": data["first_name"],
+            "last_name": data["last_name"],
+            "birthdate": data["birthdate"],
+            "sex": data["sex"],
+            "role": role
+        },
+        "localisation": {"longitude": None, "latitude": None},
+    }
+
+    if role == "driver":
+        user.update({
+            "rating": 0,
+            "routes": []
+        })
+    else:
+        user.update({
+            "travel": {
+                "start_lon": None, "start_lat": None,
+                "end_lon": None, "end_lat": None
+            }
+        })
+
+    users.append(user)
+    save_data(file_path, users)
+
+    return jsonify({"message": f"Utilisateur {role} enregistré avec succès"}), 200
+
+
+@app.route('/login', methods=['POST'])
+@cross_origin()
+def login():
+    """
+    Connexion d'un utilisateur avec email, username ou téléphone.
+    ---
+    tags:
+      - Authentification
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - identifier
+            - password
+          properties:
+            identifier:
+              type: string
+              example: "john@example.com"
+              description: "Email, username ou numéro de téléphone"
+            password:
+              type: string
+              example: "password123"
+    responses:
+      200:
+        description: Connexion réussie avec token
+      401:
+        description: Identifiants incorrects
+    """
+    data = request.get_json()
+    identifier = data.get("identifier")  # Peut être email, username ou phone_number
+    password = hashlib.sha256(data.get("password").encode()).hexdigest()
+
+    # Charger les fichiers
+    # users = {**load_data(DRIVERS_FILE), **load_data(PASSENGERS_FILE)}
+    users = load_data(DRIVERS_FILE) + load_data(PASSENGERS_FILE)
+
+    # Vérifier l'utilisateur avec email, username ou téléphone
+    for user in users:
+        personal_info = user["personal_info"]
+        if identifier in [personal_info["email"], personal_info["username"], personal_info["phone_number"]]:
+            if personal_info["password"] == password:
+                # 🔹 Génération du token
+                token = str(uuid.uuid4())  
+                active_sessions[token] = user['personal_info']['username']  # 🔹 Stockage de la session
+                
+                return jsonify({
+                    "message": "Connexion réussie",
+                    "token": token,  # Le token est renvoyé ici
+                    "role": personal_info["role"]  # 🔹 Info utile pour le frontend
+                }), 200
+
+    return jsonify({"message": "Identifiants incorrects"}), 401
+
+
+
+@app.route('/set_localisation', methods=['POST'])
+@cross_origin()
+def set_localisation():
+    """
+    Mise à jour de la localisation d'un utilisateur.
+    ---
+    tags:
+      - Utilisateur
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - token
+            - longitude
+            - latitude
+          properties:
+            token:
+              type: string
+              example: "c1247d5b-938f-4dfb-bfd7-8416b9c24b4a"
+              description: "Token d'authentification de l'utilisateur"
+            longitude:
+              type: number
+              example: 11.5234
+              description: "Longitude de l'utilisateur"
+            latitude:
+              type: number
+              example: 3.8765
+              description: "Latitude de l'utilisateur"
+    responses:
+      200:
+        description: Localisation mise à jour avec succès
+      400:
+        description: Requête invalide ou utilisateur non trouvé
+      401:
+        description: Token invalide
+    """
+    data = request.get_json()
+    token = data.get("token")
+    longitude = data.get("longitude")
+    latitude = data.get("latitude")
+
+    if token not in active_sessions:
+        return jsonify({"message": "Token invalide"}), 401
+
+    username = active_sessions[token]
+    
+    # Charger les fichiers
+    drivers = load_data(DRIVERS_FILE)
+    passengers = load_data(PASSENGERS_FILE)
+
+    if username in drivers:
+        users = drivers
+        file_path = DRIVERS_FILE
+    elif username in passengers:
+        users = passengers
+        file_path = PASSENGERS_FILE
+    else:
+        return jsonify({"message": "Utilisateur non trouvé"}), 400
+
+    # Mettre à jour la localisation
+    users[username]["localisation"] = {"longitude": longitude, "latitude": latitude}
+    save_data(file_path, users)
+
+    return jsonify({"message": "Localisation mise à jour avec succès"}), 200
+
+@app.route('/get_localisation', methods=['GET'])
+@cross_origin()
+def get_localisation():
+    """
+    Récupérer les informations de localisation de l'utilisateur.
+    ---
+    tags:
+      - Authentification
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+    responses:
+      200:
+        description: Localisation récupérée avec succès
+        schema:
+          type: object
+          properties:
+            longitude:
+              type: number
+              example: 12.345
+            latitude:
+              type: number
+              example: 54.321
+      401:
+        description: Token invalide ou manquant
+      404:
+        description: Localisation non trouvée
+    """
+    token = request.headers.get('Authorization')  # Récupérer le token de l'en-tête
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)  # Vérifier si le token est valide
+
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les fichiers des utilisateurs
+    users = {**load_data(DRIVERS_FILE), **load_data(PASSENGERS_FILE)}
+
+    # Récupérer l'utilisateur associé au token
+    user = users.get(username)
+    if not user:
+        return jsonify({"message": "Utilisateur non trouvé"}), 404
+
+    # Retourner les informations de localisation
+    localisation = user.get("localisation")
+    if not localisation:
+        return jsonify({"message": "Localisation non trouvée"}), 404
+
+    return jsonify(localisation), 200
+
+@app.route('/set_routes', methods=['POST'])
+@cross_origin()
+def set_routes():
+    """
+    Permet à un conducteur de définir plusieurs de ses itinéraires.
+    ---
+    tags:
+      - Conducteur
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            routes:
+              type: array
+              items:
+                type: object
+                properties:
+                  start:
+                    type: string
+                    example: "Point A"
+                  end:
+                    type: string
+                    example: "Point B"
+    responses:
+      200:
+        description: Routes mises à jour avec succès
+      401:
+        description: Token invalide ou manquant
+      400:
+        description: Mauvais format ou données invalides
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(DRIVERS_FILE)
+    driver = users.get(username)
+
+    if not driver or driver["personal_info"]["role"] != "driver":
+        return jsonify({"message": "Utilisateur non conducteur"}), 401
+
+    data = request.get_json()
+    routes = data.get("routes")
+
+    if not routes or not all("start" in route and "end" in route for route in routes):
+        return jsonify({"message": "Données invalides"}), 400
+
+    # Mettre à jour les routes du driver
+    driver["routes"] = routes
+    users[username] = driver
+    save_data(DRIVERS_FILE, users)
+
+    return jsonify({"message": "Routes mises à jour avec succès"}), 200
+
+
+@app.route('/get_users', methods=['GET'])
+@cross_origin()
+def get_users():
+    """
+    Récupérer la liste des utilisateurs.
+    ---
+    tags:
+      - Utilisateur
+    responses:
+      200:
+        description: Liste des utilisateurs récupérée avec succès
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              username:
+                type: string
+              email:
+                type: string
+              phone_number:
+                type: string
+              first_name:
+                type: string
+              last_name:
+                type: string
+              birthdate:
+                type: string
+              sex:
+                type: string
+              role:
+                type: string
+    """
+    # Charger les fichiers des utilisateurs
+    drivers = load_data(DRIVERS_FILE)
+    passengers = load_data(PASSENGERS_FILE)
+
+    # Fusionner les utilisateurs
+    users = drivers + passengers
+
+    # Extraire les informations pertinentes
+    # user_list = [
+    #     {
+    #         "username": user["personal_info"]["username"],
+    #         "email": user["personal_info"]["email"],
+    #         "phone_number": user["personal_info"]["phone_number"],
+    #         "first_name": user["personal_info"]["first_name"],
+    #         "last_name": user["personal_info"]["last_name"],
+    #         "birthdate": user["personal_info"]["birthdate"],
+    #         "sex": user["personal_info"]["sex"],
+    #         "role": user["personal_info"]["role"]
+    #     }
+    #     for user in users
+    # ]
+
+    return jsonify(users), 200
+
+
+@app.route('/get_routes', methods=['GET'])
+@cross_origin()
+def get_routes():
+    """
+    Permet à un conducteur de récupérer ses itinéraires.
+    ---
+    tags:
+      - Conducteur
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+    responses:
+      200:
+        description: Routes récupérées avec succès
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              start:
+                type: string
+                example: "Point A"
+              end:
+                type: string
+                example: "Point B"
+      401:
+        description: Token invalide ou manquant
+      404:
+        description: Aucune route trouvée
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(DRIVERS_FILE)
+    driver = users.get(username)
+
+    if not driver or driver["personal_info"]["role"] != "driver":
+        return jsonify({"message": "Utilisateur non conducteur"}), 401
+
+    # Retourner les itinéraires du conducteur
+    routes = driver.get("routes", [])
+
+    if not routes:
+        return jsonify({"message": "Aucune route trouvée"}), 404
+
+    return jsonify(routes), 200
+
+
+@app.route('/set_travel', methods=['POST'])
+@cross_origin()
+def set_travel():
+    """
+    Permet à un passager de définir ou de mettre à jour son itinéraire de voyage.
+    ---
+    tags:
+      - Passager
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            start_lon:
+              type: number
+              example: 12.345
+            start_lat:
+              type: number
+              example: 54.321
+            end_lon:
+              type: number
+              example: 14.567
+            end_lat:
+              type: number
+              example: 55.432
+    responses:
+      200:
+        description: Itinéraire de voyage mis à jour avec succès
+      401:
+        description: Token invalide ou manquant
+      400:
+        description: Mauvais format ou données invalides
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(PASSENGERS_FILE)
+    passenger = users.get(username)
+
+    if not passenger or passenger["personal_info"]["role"] != "passenger":
+        return jsonify({"message": "Utilisateur non passager"}), 401
+
+    data = request.get_json()
+    start_lon = data.get("start_lon")
+    start_lat = data.get("start_lat")
+    end_lon = data.get("end_lon")
+    end_lat = data.get("end_lat")
+
+    if not (start_lon and start_lat and end_lon and end_lat):
+        return jsonify({"message": "Données de localisation invalides"}), 400
+
+    # Mettre à jour le voyage du passager
+    passenger["travel"] = {
+        "start_lon": start_lon,
+        "start_lat": start_lat,
+        "end_lon": end_lon,
+        "end_lat": end_lat
+    }
+    users[username] = passenger
+    save_data(PASSENGERS_FILE, users)
+
+    return jsonify({"message": "Itinéraire de voyage mis à jour avec succès"}), 200
+
+@app.route('/get_travel', methods=['GET'])
+@cross_origin()
+def get_travel():
+    """
+    Permet à un passager de récupérer son itinéraire de voyage.
+    ---
+    tags:
+      - Passager
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+    responses:
+      200:
+        description: Itinéraire de voyage récupéré avec succès
+        schema:
+          type: object
+          properties:
+            start_lon:
+              type: number
+              example: 12.345
+            start_lat:
+              type: number
+              example: 54.321
+            end_lon:
+              type: number
+              example: 14.567
+            end_lat:
+              type: number
+              example: 55.432
+      401:
+        description: Token invalide ou manquant
+      404:
+        description: Itinéraire de voyage non trouvé
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(PASSENGERS_FILE)
+    passenger = users.get(username)
+
+    if not passenger or passenger["personal_info"]["role"] != "passenger":
+        return jsonify({"message": "Utilisateur non passager"}), 401
+
+    # Retourner l'itinéraire du passager
+    travel = passenger.get("travel")
+
+    if not travel:
+        return jsonify({"message": "Itinéraire de voyage non trouvé"}), 404
+
+    return jsonify(travel), 200
+
+
+
+# @app.route("/assign_driver", methods=["POST"])
+# def assign_driver():
+#     """Endpoint pour assigner un chauffeur à un passager."""
+#     passenger_data = request.json
+#     passenger = pd.Series(passenger_data)
+#     best_driver, best_score = assign_driver_to_passenger(passenger)
+#     if best_driver is not None:
+#         return jsonify({
+#             "driver_id": best_driver['driver_id'],
+#             "score": best_score
+#         })
+#     return jsonify({"message": "Aucun chauffeur disponible."}), 404
+
+# @app.route("/top_customers/<driver_username>/<int:n>", methods=["GET"])
+# def top_customers(driver_username, n):
+#     """Endpoint pour récupérer les n premiers clients d'un chauffeur."""
+#     try:
+#         top_customers = get_top_n_customers(driver_username, n)
+#         return jsonify({"top_customers": top_customers})
+#     except IndexError:
+#         return jsonify({"message": "Chauffeur introuvable."}), 404
+
+
+# @app.route('/cost', methods=['POST'])
+# def cost():
+#     data = request.get_json()
+#     data = get_data(data.get('start'), data.get('end'),data.get('hour'))
+#     cost = calculate_cost(data)
+#     # return jsonify({'cost':cost})
+#     return f"{cost}"
+
+@app.route("/top_customers/<driver_username>/<int:n>", methods=["GET"])
+@cross_origin()
+def top_customers(driver_username, n):
+    """
+    Récupère les N clients les plus fréquents d'un chauffeur spécifique.
+    ---
+    tags:
+      - Statistiques Chauffeur
+    parameters:
+      - name: driver_username
+        in: path
+        type: string
+        required: true
+        description: Nom d'utilisateur du chauffeur
+        example: "johndoe"
+      - name: n
+        in: path
+        type: integer
+        required: true
+        description: Nombre de clients à retourner
+        example: 5
+    responses:
+      200:
+        description: Liste des N premiers clients
+        schema:
+          type: object
+          properties:
+            top_customers:
+              type: array
+              items:
+                type: object
+                properties:
+                  username:
+                    type: string
+                  trip_count:
+                    type: integer
+      404:
+        description: Chauffeur non trouvé
+    """
+    try:
+        top_customers = get_top_n_customers(driver_username, n)
+        return jsonify({"top_customers": top_customers})
+    except IndexError:
+        return jsonify({"message": "Chauffeur introuvable."}), 404
+
+
+# # function to convert hour
+# def map_hour_to_integer(hour):
+#     if isinstance(hour, int):
+#         # Si c'est déjà un entier entre 0 et 23, le retourner directement
+#         if 0 <= hour <= 23:
+#             return hour
+#         else:
+#             raise ValueError("L'heure doit être entre 0 et 23")
+#     elif isinstance(hour, str):
+#         # Si c'est une chaîne au format HH:MM, la convertir
+#         try:
+#             time_obj = datetime.strptime(hour, "%H:%M").time()
+#             return time_obj.hour
+#         except ValueError:
+#             raise ValueError("Le format de l'heure doit être HH:MM")
+        
+
+@app.route('/cost', methods=['POST'])
+@cross_origin()
+def cost():
+    """
+    Calcule le coût estimé d'une course en fonction des paramètres fournis.
+    ---
+    tags:
+      - Tarification
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - start
+            - end
+            - hour
+          properties:
+            start:
+              type: string
+              description: Point de départ (nom du lieu ou adresse)
+              example: "Yaoundé, Carrefour Warda"
+            end:
+              type: string
+              description: Point d'arrivée (nom du lieu ou adresse)
+              example: "Yaoundé, Poste Centrale"
+            hour:
+              type: string
+              description: Heure de départ au format HH:MM
+              example: "14:01"
+    responses:
+      200:
+        description: Détails de la tarification
+        schema:
+          type: object
+          properties:
+            cost:
+              type: number
+              description: Coût estimé de la course
+              example: 2500
+            distance:
+              type: number
+              description: Distance entre les deux points en kilomètres
+              example: 5.2
+            start:
+              type: string
+              description: Point de départ
+              example: "Yaoundé, Carrefour Warda"
+            end:
+              type: string
+              description: Point d'arrivée
+              example: "Yaoundé, Poste Centrale"
+            mint_cost:
+              type: number
+              description: Coût minimum selon l'heure
+              example: 350
+      400:
+        description: Données invalides ou manquantes
+    """
+    data = request.get_json()
+
+    start = data.get('start')
+    end = data.get('end')
+    hour = data.get('hour')
+    data = get_data(start, end, hour)
+
+    start_lon, start_lat = get_coordinates(start)
+    end_lon, end_lat = get_coordinates(end)
+    distance = calculate_distance(start_lon, start_lat, end_lon, end_lat)
+    cost = calculate_cost(data)
+
+    # Convertir le coût en un type sérialisable JSON
+    cost = cost.item() if hasattr(cost, 'item') else cost
+
+    mint_cost = 350
+
+    return jsonify({
+      "cost": cost,
+      "distance": distance,
+      "start": start,
+      "end": end,
+      "mint_cost": mint_cost
+    })
+
+    
+def calculate_cost(data):
+    return model.predict(data)
+
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=port, debug=False)
+```
+
+## Aperçu des fichiers sources
+
+### Fichier : `./utils.py`
+```python
+"""Functions used by the api"""
+
+import joblib
+from geopy.distance import geodesic
+import requests
+from datetime import datetime
+import pickle
+import math
+import random
+import pandas as pd
+
+
+# Chemin vers les fichiers binaires
+DRIVER_DATA_FILE = 'drivers.pkl'
+PASSENGER_DATA_FILE = 'passengers.pkl'
+
+# Fonction pour charger les données depuis un fichier binaire
+def load_data(file_path):
+    try:
+        with open(file_path, 'rb') as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return []  # Retourner un dictionnaire vide si le fichier n'existe pas
+
+# Fonction pour sauvegarder les données dans un fichier binaire
+def save_data(file_path, data):
+    with open(file_path, 'wb') as f:
+        pickle.dump(data, f)
+        
+drivers = load_data(DRIVER_DATA_FILE)
+passengers = load_data(PASSENGER_DATA_FILE)
+
+# Constantes des poids
+w1, w2, w3 = 0.3, 0.2, 0.5
+
+# Rayon de la Terre en kilomètres
+EARTH_RADIUS = 6371.0
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Calcule la distance de Haversine entre deux points géographiques."""
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+    return EARTH_RADIUS * c
+
+def compute_relevance_score(passenger, driver):
+    """Calcule le score de pertinence Sij."""
+    # Distance entre passager et chauffeur
+    distance = haversine(
+        passenger['travel']['start_lat'], passenger['travel']['start_lon'],
+        driver['localisation']['longitude'], driver['localisation']['latitude']
+    )
+    # Concordance des itinéraires (simulation ici)
+    concordance = 1 if random.choice([True, False]) else 0
+    # Score final
+    score = w1 * (1 / (1 + distance)) + w2 * driver['rating'] + w3 * concordance
+    return score
+
+# def assign_driver_to_passenger(passenger):
+#     """Assigne le chauffeur avec le score le plus élevé à un passager."""
+#     best_driver = None
+#     best_score = -1
+#     for _, driver in driver_df.iterrows():
+#         score = compute_relevance_score(passenger, driver)
+#         if score > best_score:
+#             best_driver = driver
+#             best_score = score
+#     return best_driver, best_score
+
+def get_top_n_customers(driver_id, n):
+    """Récupère les n premiers clients pour un chauffeur donné en fonction du score."""
+    print(drivers)
+    driver = next((d for d in drivers if d['personal_info']['username'] == driver_id), None)
+    if driver is None:
+        raise ValueError(f"No driver found with username {driver_id}")
+    passenger_scores = []
+    
+    for passenger in passengers:
+        score = compute_relevance_score(passenger, driver)
+        passenger_scores.append((passenger['passenger_id'], score))
+
+    passenger_scores.sort(key=lambda x: x[1], reverse=True)
+    return passenger_scores[:n]
+
+model = joblib.load('random_forests.pkl')
+
+def calculate_cost(data):
+    return model.predict(data)
+
+def calculate_distance(lon_dep, lat_dep, lon_arr, lat_arr):
+    return geodesic((lon_dep, lat_dep), (lon_arr, lat_arr)).kilometers
+
+# Fonction pour obtenir les coordonnées à partir d'un quartier
+def get_coordinates(neighborhood, city="Yaoundé", country="Cameroon"):
+    address = f"{neighborhood}, {city}, {country}"
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": address,
+        "format": "json",
+        "limit": 1
+    }
+    headers = {
+        # "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent":"RIdeAndGo/1..0{tresoeleroyd@gmail.com}"
+    }
+    response = requests.get(url, params=params, headers=headers)
+    print(response.status_code)
+    if response.status_code == 200 and response.json():
+        print(response.text)
+        data = response.json()[0]
+        return float(data["lon"]), float(data["lat"])  # Renvoie (longitude, latitude)
+    else:
+        return None, None
+
+def map_hour_to_integer(hour_str):
+    """
+    Mappe une heure au format HH:MM à un entier selon le mapping donné.
+
+    :param hour_str: Une heure sous forme de chaîne de caractères (ex : "14:30").
+    :return: L'entier correspondant au créneau horaire ou None si l'heure est invalide.
+    """
+    from datetime import datetime
+
+    # Définir le mapping des créneaux horaires
+    hour_mapping = {
+        ("00:00", "04:59"): 1,
+        ("05:00", "06:59"): 2,
+        ("07:00", "08:59"): 3,
+        ("09:00", "13:59"): 4,
+        ("14:00", "15:29"): 5,
+        ("15:30", "18:59"): 6,
+        ("19:00", "21:00"): 7,
+        ("21:01", "23:59"): 8,
+    }
+
+    try:
+        # Convertir l'heure en objet datetime
+        time_obj = datetime.strptime(hour_str, "%H:%M").time()
+
+        # Parcourir le mapping pour trouver le créneau correspondant
+        for (start, end), value in hour_mapping.items():
+            start_time = datetime.strptime(start, "%H:%M").time()
+            end_time = datetime.strptime(end, "%H:%M").time()
+
+            if start_time <= time_obj <= end_time:
+                return value
+
+    except ValueError:
+        # Si l'heure est invalide
+        print("Format d'heure invalide. Veuillez utiliser HH:MM.")
+
+    return None
+
+def get_data(start_p, end_p, hour=None):
+    if hour is None:
+        hour=datetime.now().strftime("%H:%M")
+    lon_dep, lat_dep = get_coordinates(start_p)
+    lon_arr, lat_arr = get_coordinates(end_p)
+    distance = calculate_distance(lon_dep, lat_dep, lon_arr, lat_arr)
+    hour = map_hour_to_integer(hour)
+    if hour is None:
+        raise ValueError(f"Impossible de mapper l'heure {hour}. Format attendu : HH:MM.")
+    data = [[lon_dep, lat_dep, lon_arr, lat_arr, distance, hour]]
+    return data```
+
+### Fichier : `./api.py`
+```python
+import pandas as pd
+import math
+import random
+from flask import Flask, request, jsonify
+from utils import *
+import os
+
+# Charger les données
+passenger_df = pd.read_csv("passenger_data.csv")
+driver_df = pd.read_csv("driver_data.csv")
+
+# Constantes des poids
+w1, w2, w3 = 0.3, 0.2, 0.5
+
+# Rayon de la Terre en kilomètres
+EARTH_RADIUS = 6371.0
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Calcule la distance de Haversine entre deux points géographiques."""
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+    return EARTH_RADIUS * c
+
+def compute_relevance_score(passenger, driver):
+    """Calcule le score de pertinence Sij."""
+    # Distance entre passager et chauffeur
+    distance = haversine(
+        passenger['latitude'], passenger['longitude'],
+        driver['latitude'], driver['longitude']
+    )
+    # Concordance des itinéraires (simulation ici)
+    concordance = 1 if random.choice([True, False]) else 0
+    # Score final
+    score = w1 * (1 / (1 + distance)) + w2 * driver['rating'] + w3 * concordance
+    return score
+
+def assign_driver_to_passenger(passenger):
+    """Assigne le chauffeur avec le score le plus élevé à un passager."""
+    best_driver = None
+    best_score = -1
+    for _, driver in driver_df.iterrows():
+        score = compute_relevance_score(passenger, driver)
+        if score > best_score:
+            best_driver = driver
+            best_score = score
+    return best_driver, best_score
+
+def get_top_n_customers(driver_id, n):
+    """Récupère les n premiers clients pour un chauffeur donné en fonction du score."""
+    driver = driver_df[driver_df['driver_id'] == driver_id].iloc[0]
+    passenger_scores = []
+
+    for _, passenger in passenger_df.iterrows():
+        score = compute_relevance_score(passenger, driver)
+        passenger_scores.append((passenger['passenger_id'], score))
+
+    passenger_scores.sort(key=lambda x: x[1], reverse=True)
+    return passenger_scores[:n]
+
+# Initialiser Flask
+app = Flask(__name__)
+
+@app.route("/", methods=["GET"])
+def welcome():
+    """ACCUEIL"""
+    
+    return jsonify({"message": "Bienvenue sur l'api de recommandation des clients et chauffeurs pour l'application Ride and go."}), 200
+
+@app.route("/assign_driver", methods=["POST"])
+def assign_driver():
+    """Endpoint pour assigner un chauffeur à un passager."""
+    passenger_data = request.json
+    passenger = pd.Series(passenger_data)
+    best_driver, best_score = assign_driver_to_passenger(passenger)
+    if best_driver is not None:
+        return jsonify({
+            "driver_id": best_driver['driver_id'],
+            "score": best_score
+        })
+    return jsonify({"message": "Aucun chauffeur disponible."}), 404
+
+@app.route("/top_customers/<driver_id>/<int:n>", methods=["GET"])
+def top_customers(driver_id, n):
+    """Endpoint pour récupérer les n premiers clients d'un chauffeur."""
+    try:
+        top_customers = get_top_n_customers(driver_id, n)
+        return jsonify({"top_customers": top_customers})
+    except IndexError:
+        return jsonify({"message": "Chauffeur introuvable."}), 404
+
+
+@app.route('/cost', methods=['POST'])
+def cost():
+    data = request.get_json()
+    data = get_data(data.get('start'), data.get('end'),data.get('hour'))
+    cost = calculate_cost(data)
+    # return jsonify({'cost':cost})
+    return f"{cost}"
+    
+def calculate_cost(data):
+    return model.predict(data)
+
+if __name__ == '__main__':
+    app.run(debug=True)```
+
+### Fichier : `./app.py`
+```python
+import uuid
+from flask import Flask, request, jsonify
+from flasgger import Swagger
+from utils import *
+import os
+import hashlib
+import time
+from flask_cors import CORS, cross_origin
+
+
+port = int(os.environ.get("PORT", 5000))
+
+DRIVERS_FILE = 'drivers.pkl'
+PASSENGERS_FILE = 'passengers.pkl'
+
+# Initialiser Flask
+app = Flask(__name__)
+Swagger(app)
+CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://rideandgo.vercel.app"]}})
+
+@app.route('/docs')
+@cross_origin()
+def swagger_ui():
+    return redirect('/apidocs/') 
+
+
+@app.route("/", methods=["GET"])
+@cross_origin()
+def welcome():
+    """ACCUEIL"""
+    return jsonify({"message": "Bienvenue sur l'api de recommandation des clients et chauffeurs pour l'application Ride and go."}), 200
+
+# Stockage temporaire des tokens
+active_sessions = {}
+
+@app.route('/register', methods=['POST'])
+@cross_origin()
+def register():
+    """
+    Inscription d'un nouvel utilisateur.
+    ---
+    tags:
+      - Authentification
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - username
+            - email
+            - password
+            - phone_number
+            - first_name
+            - last_name
+            - birthdate
+            - sex
+            - role
+          properties:
+            username:
+              type: string
+              example: "johndoe"
+            email:
+              type: string
+              example: "john@example.com"
+            password:
+              type: string
+              example: "password123"
+            phone_number:
+              type: string
+              example: "+237691234567"
+            first_name:
+              type: string
+              example: "John"
+            last_name:
+              type: string
+              example: "Doe"
+            birthdate:
+              type: string
+              example: "1995-06-15"
+            sex:
+              type: string
+              enum: ["M", "F"]
+              example: "M"
+            role:
+              type: string
+              enum: ["driver", "passenger"]
+              example: "driver"
+    responses:
+      200:
+        description: Utilisateur enregistré avec succès
+      400:
+        description: Erreur dans les données fournies
+    """
+    data = request.get_json()
+    role = data.get("role")
+
+    if role not in ["driver", "passenger"]:
+        return jsonify({"message": "Rôle invalide !"}), 400
+
+    file_path = DRIVERS_FILE if role == "driver" else PASSENGERS_FILE
+    users = load_data(file_path)
+
+    if data["username"] in users:
+        return jsonify({"message": "Cet utilisateur existe déjà"}), 400
+
+    hashed_password = hashlib.sha256(data["password"].encode()).hexdigest()
+
+    user = {
+        "personal_info": {
+            "username": data["username"],
+            "email": data["email"],
+            "password": hashed_password,
+            "phone_number": data["phone_number"],
+            "first_name": data["first_name"],
+            "last_name": data["last_name"],
+            "birthdate": data["birthdate"],
+            "sex": data["sex"],
+            "role": role
+        },
+        "localisation": {"longitude": None, "latitude": None},
+    }
+
+    if role == "driver":
+        user.update({
+            "rating": 0,
+            "routes": []
+        })
+    else:
+        user.update({
+            "travel": {
+                "start_lon": None, "start_lat": None,
+                "end_lon": None, "end_lat": None
+            }
+        })
+
+    users.append(user)
+    save_data(file_path, users)
+
+    return jsonify({"message": f"Utilisateur {role} enregistré avec succès"}), 200
+
+
+@app.route('/login', methods=['POST'])
+@cross_origin()
+def login():
+    """
+    Connexion d'un utilisateur avec email, username ou téléphone.
+    ---
+    tags:
+      - Authentification
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - identifier
+            - password
+          properties:
+            identifier:
+              type: string
+              example: "john@example.com"
+              description: "Email, username ou numéro de téléphone"
+            password:
+              type: string
+              example: "password123"
+    responses:
+      200:
+        description: Connexion réussie avec token
+      401:
+        description: Identifiants incorrects
+    """
+    data = request.get_json()
+    identifier = data.get("identifier")  # Peut être email, username ou phone_number
+    password = hashlib.sha256(data.get("password").encode()).hexdigest()
+
+    # Charger les fichiers
+    # users = {**load_data(DRIVERS_FILE), **load_data(PASSENGERS_FILE)}
+    users = load_data(DRIVERS_FILE) + load_data(PASSENGERS_FILE)
+
+    # Vérifier l'utilisateur avec email, username ou téléphone
+    for user in users:
+        personal_info = user["personal_info"]
+        if identifier in [personal_info["email"], personal_info["username"], personal_info["phone_number"]]:
+            if personal_info["password"] == password:
+                # 🔹 Génération du token
+                token = str(uuid.uuid4())  
+                active_sessions[token] = user['personal_info']['username']  # 🔹 Stockage de la session
+                
+                return jsonify({
+                    "message": "Connexion réussie",
+                    "token": token,  # Le token est renvoyé ici
+                    "role": personal_info["role"]  # 🔹 Info utile pour le frontend
+                }), 200
+
+    return jsonify({"message": "Identifiants incorrects"}), 401
+
+
+
+@app.route('/set_localisation', methods=['POST'])
+@cross_origin()
+def set_localisation():
+    """
+    Mise à jour de la localisation d'un utilisateur.
+    ---
+    tags:
+      - Utilisateur
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - token
+            - longitude
+            - latitude
+          properties:
+            token:
+              type: string
+              example: "c1247d5b-938f-4dfb-bfd7-8416b9c24b4a"
+              description: "Token d'authentification de l'utilisateur"
+            longitude:
+              type: number
+              example: 11.5234
+              description: "Longitude de l'utilisateur"
+            latitude:
+              type: number
+              example: 3.8765
+              description: "Latitude de l'utilisateur"
+    responses:
+      200:
+        description: Localisation mise à jour avec succès
+      400:
+        description: Requête invalide ou utilisateur non trouvé
+      401:
+        description: Token invalide
+    """
+    data = request.get_json()
+    token = data.get("token")
+    longitude = data.get("longitude")
+    latitude = data.get("latitude")
+
+    if token not in active_sessions:
+        return jsonify({"message": "Token invalide"}), 401
+
+    username = active_sessions[token]
+    
+    # Charger les fichiers
+    drivers = load_data(DRIVERS_FILE)
+    passengers = load_data(PASSENGERS_FILE)
+
+    if username in drivers:
+        users = drivers
+        file_path = DRIVERS_FILE
+    elif username in passengers:
+        users = passengers
+        file_path = PASSENGERS_FILE
+    else:
+        return jsonify({"message": "Utilisateur non trouvé"}), 400
+
+    # Mettre à jour la localisation
+    users[username]["localisation"] = {"longitude": longitude, "latitude": latitude}
+    save_data(file_path, users)
+
+    return jsonify({"message": "Localisation mise à jour avec succès"}), 200
+
+@app.route('/get_localisation', methods=['GET'])
+@cross_origin()
+def get_localisation():
+    """
+    Récupérer les informations de localisation de l'utilisateur.
+    ---
+    tags:
+      - Authentification
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+    responses:
+      200:
+        description: Localisation récupérée avec succès
+        schema:
+          type: object
+          properties:
+            longitude:
+              type: number
+              example: 12.345
+            latitude:
+              type: number
+              example: 54.321
+      401:
+        description: Token invalide ou manquant
+      404:
+        description: Localisation non trouvée
+    """
+    token = request.headers.get('Authorization')  # Récupérer le token de l'en-tête
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)  # Vérifier si le token est valide
+
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les fichiers des utilisateurs
+    users = {**load_data(DRIVERS_FILE), **load_data(PASSENGERS_FILE)}
+
+    # Récupérer l'utilisateur associé au token
+    user = users.get(username)
+    if not user:
+        return jsonify({"message": "Utilisateur non trouvé"}), 404
+
+    # Retourner les informations de localisation
+    localisation = user.get("localisation")
+    if not localisation:
+        return jsonify({"message": "Localisation non trouvée"}), 404
+
+    return jsonify(localisation), 200
+
+@app.route('/set_routes', methods=['POST'])
+@cross_origin()
+def set_routes():
+    """
+    Permet à un conducteur de définir plusieurs de ses itinéraires.
+    ---
+    tags:
+      - Conducteur
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            routes:
+              type: array
+              items:
+                type: object
+                properties:
+                  start:
+                    type: string
+                    example: "Point A"
+                  end:
+                    type: string
+                    example: "Point B"
+    responses:
+      200:
+        description: Routes mises à jour avec succès
+      401:
+        description: Token invalide ou manquant
+      400:
+        description: Mauvais format ou données invalides
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(DRIVERS_FILE)
+    driver = users.get(username)
+
+    if not driver or driver["personal_info"]["role"] != "driver":
+        return jsonify({"message": "Utilisateur non conducteur"}), 401
+
+    data = request.get_json()
+    routes = data.get("routes")
+
+    if not routes or not all("start" in route and "end" in route for route in routes):
+        return jsonify({"message": "Données invalides"}), 400
+
+    # Mettre à jour les routes du driver
+    driver["routes"] = routes
+    users[username] = driver
+    save_data(DRIVERS_FILE, users)
+
+    return jsonify({"message": "Routes mises à jour avec succès"}), 200
+
+
+@app.route('/get_users', methods=['GET'])
+@cross_origin()
+def get_users():
+    """
+    Récupérer la liste des utilisateurs.
+    ---
+    tags:
+      - Utilisateur
+    responses:
+      200:
+        description: Liste des utilisateurs récupérée avec succès
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              username:
+                type: string
+              email:
+                type: string
+              phone_number:
+                type: string
+              first_name:
+                type: string
+              last_name:
+                type: string
+              birthdate:
+                type: string
+              sex:
+                type: string
+              role:
+                type: string
+    """
+    # Charger les fichiers des utilisateurs
+    drivers = load_data(DRIVERS_FILE)
+    passengers = load_data(PASSENGERS_FILE)
+
+    # Fusionner les utilisateurs
+    users = drivers + passengers
+
+    # Extraire les informations pertinentes
+    # user_list = [
+    #     {
+    #         "username": user["personal_info"]["username"],
+    #         "email": user["personal_info"]["email"],
+    #         "phone_number": user["personal_info"]["phone_number"],
+    #         "first_name": user["personal_info"]["first_name"],
+    #         "last_name": user["personal_info"]["last_name"],
+    #         "birthdate": user["personal_info"]["birthdate"],
+    #         "sex": user["personal_info"]["sex"],
+    #         "role": user["personal_info"]["role"]
+    #     }
+    #     for user in users
+    # ]
+
+    return jsonify(users), 200
+
+
+@app.route('/get_routes', methods=['GET'])
+@cross_origin()
+def get_routes():
+    """
+    Permet à un conducteur de récupérer ses itinéraires.
+    ---
+    tags:
+      - Conducteur
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+    responses:
+      200:
+        description: Routes récupérées avec succès
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              start:
+                type: string
+                example: "Point A"
+              end:
+                type: string
+                example: "Point B"
+      401:
+        description: Token invalide ou manquant
+      404:
+        description: Aucune route trouvée
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(DRIVERS_FILE)
+    driver = users.get(username)
+
+    if not driver or driver["personal_info"]["role"] != "driver":
+        return jsonify({"message": "Utilisateur non conducteur"}), 401
+
+    # Retourner les itinéraires du conducteur
+    routes = driver.get("routes", [])
+
+    if not routes:
+        return jsonify({"message": "Aucune route trouvée"}), 404
+
+    return jsonify(routes), 200
+
+
+@app.route('/set_travel', methods=['POST'])
+@cross_origin()
+def set_travel():
+    """
+    Permet à un passager de définir ou de mettre à jour son itinéraire de voyage.
+    ---
+    tags:
+      - Passager
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            start_lon:
+              type: number
+              example: 12.345
+            start_lat:
+              type: number
+              example: 54.321
+            end_lon:
+              type: number
+              example: 14.567
+            end_lat:
+              type: number
+              example: 55.432
+    responses:
+      200:
+        description: Itinéraire de voyage mis à jour avec succès
+      401:
+        description: Token invalide ou manquant
+      400:
+        description: Mauvais format ou données invalides
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(PASSENGERS_FILE)
+    passenger = users.get(username)
+
+    if not passenger or passenger["personal_info"]["role"] != "passenger":
+        return jsonify({"message": "Utilisateur non passager"}), 401
+
+    data = request.get_json()
+    start_lon = data.get("start_lon")
+    start_lat = data.get("start_lat")
+    end_lon = data.get("end_lon")
+    end_lat = data.get("end_lat")
+
+    if not (start_lon and start_lat and end_lon and end_lat):
+        return jsonify({"message": "Données de localisation invalides"}), 400
+
+    # Mettre à jour le voyage du passager
+    passenger["travel"] = {
+        "start_lon": start_lon,
+        "start_lat": start_lat,
+        "end_lon": end_lon,
+        "end_lat": end_lat
+    }
+    users[username] = passenger
+    save_data(PASSENGERS_FILE, users)
+
+    return jsonify({"message": "Itinéraire de voyage mis à jour avec succès"}), 200
+
+@app.route('/get_travel', methods=['GET'])
+@cross_origin()
+def get_travel():
+    """
+    Permet à un passager de récupérer son itinéraire de voyage.
+    ---
+    tags:
+      - Passager
+    parameters:
+      - name: Authorization
+        in: header
+        required: true
+        description: "Le token d'authentification de l'utilisateur"
+        schema:
+          type: string
+    responses:
+      200:
+        description: Itinéraire de voyage récupéré avec succès
+        schema:
+          type: object
+          properties:
+            start_lon:
+              type: number
+              example: 12.345
+            start_lat:
+              type: number
+              example: 54.321
+            end_lon:
+              type: number
+              example: 14.567
+            end_lat:
+              type: number
+              example: 55.432
+      401:
+        description: Token invalide ou manquant
+      404:
+        description: Itinéraire de voyage non trouvé
+    """
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({"message": "Token manquant"}), 401
+
+    username = active_sessions.get(token)
+    if not username:
+        return jsonify({"message": "Token invalide"}), 401
+
+    # Charger les données
+    users = load_data(PASSENGERS_FILE)
+    passenger = users.get(username)
+
+    if not passenger or passenger["personal_info"]["role"] != "passenger":
+        return jsonify({"message": "Utilisateur non passager"}), 401
+
+    # Retourner l'itinéraire du passager
+    travel = passenger.get("travel")
+
+    if not travel:
+        return jsonify({"message": "Itinéraire de voyage non trouvé"}), 404
+
+    return jsonify(travel), 200
+
+
+
+# @app.route("/assign_driver", methods=["POST"])
+# def assign_driver():
+#     """Endpoint pour assigner un chauffeur à un passager."""
+#     passenger_data = request.json
+#     passenger = pd.Series(passenger_data)
+#     best_driver, best_score = assign_driver_to_passenger(passenger)
+#     if best_driver is not None:
+#         return jsonify({
+#             "driver_id": best_driver['driver_id'],
+#             "score": best_score
+#         })
+#     return jsonify({"message": "Aucun chauffeur disponible."}), 404
+
+# @app.route("/top_customers/<driver_username>/<int:n>", methods=["GET"])
+# def top_customers(driver_username, n):
+#     """Endpoint pour récupérer les n premiers clients d'un chauffeur."""
+#     try:
+#         top_customers = get_top_n_customers(driver_username, n)
+#         return jsonify({"top_customers": top_customers})
+#     except IndexError:
+#         return jsonify({"message": "Chauffeur introuvable."}), 404
+
+
+# @app.route('/cost', methods=['POST'])
+# def cost():
+#     data = request.get_json()
+#     data = get_data(data.get('start'), data.get('end'),data.get('hour'))
+#     cost = calculate_cost(data)
+#     # return jsonify({'cost':cost})
+#     return f"{cost}"
+
+@app.route("/top_customers/<driver_username>/<int:n>", methods=["GET"])
+@cross_origin()
+def top_customers(driver_username, n):
+    """
+    Récupère les N clients les plus fréquents d'un chauffeur spécifique.
+    ---
+    tags:
+      - Statistiques Chauffeur
+    parameters:
+      - name: driver_username
+        in: path
+        type: string
+        required: true
+        description: Nom d'utilisateur du chauffeur
+        example: "johndoe"
+      - name: n
+        in: path
+        type: integer
+        required: true
+        description: Nombre de clients à retourner
+        example: 5
+    responses:
+      200:
+        description: Liste des N premiers clients
+        schema:
+          type: object
+          properties:
+            top_customers:
+              type: array
+              items:
+                type: object
+                properties:
+                  username:
+                    type: string
+                  trip_count:
+                    type: integer
+      404:
+        description: Chauffeur non trouvé
+    """
+    try:
+        top_customers = get_top_n_customers(driver_username, n)
+        return jsonify({"top_customers": top_customers})
+    except IndexError:
+        return jsonify({"message": "Chauffeur introuvable."}), 404
+
+
+# # function to convert hour
+# def map_hour_to_integer(hour):
+#     if isinstance(hour, int):
+#         # Si c'est déjà un entier entre 0 et 23, le retourner directement
+#         if 0 <= hour <= 23:
+#             return hour
+#         else:
+#             raise ValueError("L'heure doit être entre 0 et 23")
+#     elif isinstance(hour, str):
+#         # Si c'est une chaîne au format HH:MM, la convertir
+#         try:
+#             time_obj = datetime.strptime(hour, "%H:%M").time()
+#             return time_obj.hour
+#         except ValueError:
+#             raise ValueError("Le format de l'heure doit être HH:MM")
+        
+
+@app.route('/cost', methods=['POST'])
+@cross_origin()
+def cost():
+    """
+    Calcule le coût estimé d'une course en fonction des paramètres fournis.
+    ---
+    tags:
+      - Tarification
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - start
+            - end
+            - hour
+          properties:
+            start:
+              type: string
+              description: Point de départ (nom du lieu ou adresse)
+              example: "Yaoundé, Carrefour Warda"
+            end:
+              type: string
+              description: Point d'arrivée (nom du lieu ou adresse)
+              example: "Yaoundé, Poste Centrale"
+            hour:
+              type: string
+              description: Heure de départ au format HH:MM
+              example: "14:01"
+    responses:
+      200:
+        description: Détails de la tarification
+        schema:
+          type: object
+          properties:
+            cost:
+              type: number
+              description: Coût estimé de la course
+              example: 2500
+            distance:
+              type: number
+              description: Distance entre les deux points en kilomètres
+              example: 5.2
+            start:
+              type: string
+              description: Point de départ
+              example: "Yaoundé, Carrefour Warda"
+            end:
+              type: string
+              description: Point d'arrivée
+              example: "Yaoundé, Poste Centrale"
+            mint_cost:
+              type: number
+              description: Coût minimum selon l'heure
+              example: 350
+      400:
+        description: Données invalides ou manquantes
+    """
+    data = request.get_json()
+
+    start = data.get('start')
+    end = data.get('end')
+    hour = data.get('hour')
+    data = get_data(start, end, hour)
+
+    start_lon, start_lat = get_coordinates(start)
+    end_lon, end_lat = get_coordinates(end)
+    distance = calculate_distance(start_lon, start_lat, end_lon, end_lat)
+    cost = calculate_cost(data)
+
+    # Convertir le coût en un type sérialisable JSON
+    cost = cost.item() if hasattr(cost, 'item') else cost
+
+    mint_cost = 350
+
+    return jsonify({
+      "cost": cost,
+      "distance": distance,
+      "start": start,
+      "end": end,
+      "mint_cost": mint_cost
+    })
+
+    
+def calculate_cost(data):
+    return model.predict(data)
+
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=port, debug=False)
+```
+
+### Fichier : `./gunicorn.conf.py`
+```python
+import os
+
+# Nombre de workers (processus) recommandé
+workers = int(os.environ.get('GUNICORN_WORKERS', 4))
+
+# Timeout en secondes
+timeout = 120
+
+# --- MODIFICATION CLÉ ---
+# Récupérer le port depuis la variable d'environnement PORT fournie par Render.
+# Si la variable n'existe pas (pour le développement local), utiliser 8000 par défaut.
+port = os.environ.get('PORT', 8000)
+
+# Construire la directive bind dynamiquement
+bind = f"0.0.0.0:{port}"
+# --- FIN DE LA MODIFICATION ---
+
+# Activer les logs
+accesslog = '-'
+errorlog = '-'
+
+# Mode de travail recommandé
+worker_class = 'sync'
+
+# Nombre maximum de requêtes par worker avant redémarrage
+max_requests = 1000
+max_requests_jitter = 50
+
+# Préchargement de l'application
+preload_app = True```
+
+### Fichier : `./rien.py`
+```python
+import pickle
+from utils import *
+
+load_data([])```
+
+### Fichier : `./test_pickle.py`
+```python
+import pickle
+
+# Chemin vers les fichiers binaires
+DRIVER_DATA_FILE = 'driver_data.pkl'
+PASSENGER_DATA_FILE = 'passenger_data.pkl'
+
+# Fonction pour charger les données depuis un fichier binaire
+def load_data(file_path):
+    try:
+        with open(file_path, 'rb') as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return {}  # Retourner un dictionnaire vide si le fichier n'existe pas
+
+# Fonction pour sauvegarder les données dans un fichier binaire
+def save_data(file_path, data):
+    with open(file_path, 'wb') as f:
+        pickle.dump(data, f)
+
+# Fonction pour ajouter ou mettre à jour un chauffeur dans le fichier binaire
+def add_or_update_driver(driver_id, driver_info):
+    # Charger les données existantes des chauffeurs
+    drivers_data = load_data(DRIVER_DATA_FILE)
+    
+    # Ajouter ou mettre à jour les informations du chauffeur
+    drivers_data[driver_id] = driver_info
+    
+    # Sauvegarder les données mises à jour
+    save_data(DRIVER_DATA_FILE, drivers_data)
+    return {"message": "Chauffeur ajouté ou mis à jour avec succès."}
+
+# Fonction pour ajouter ou mettre à jour un passager dans le fichier binaire
+def add_or_update_passenger(passenger_id, passenger_info):
+    # Charger les données existantes des passagers
+    passengers_data = load_data(PASSENGER_DATA_FILE)
+    
+    # Ajouter ou mettre à jour les informations du passager
+    passengers_data[passenger_id] = passenger_info
+    
+    # Sauvegarder les données mises à jour
+    save_data(PASSENGER_DATA_FILE, passengers_data)
+    return {"message": "Passager ajouté ou mis à jour avec succès."}
+
+# Exemple d'utilisation
+# Ajouter ou mettre à jour un chauffeur
+driver_info = {
+    'latitude': 4.0603,
+    'longitude': 9.7085,
+    'rating': 4.7,
+    'routes': ['Route1', 'Route2']
+}
+response_driver = add_or_update_driver('driver123', driver_info)
+print(response_driver)
+
+# Ajouter ou mettre à jour un passager
+passenger_info = {
+    'latitude': 4.0583,
+    'longitude': 9.7105,
+    'departure_lat': 4.0600,
+    'departure_long': 9.7100,
+    'arrival_lat': 4.0550,
+    'arrival_long': 9.7050
+}
+response_passenger = add_or_update_passenger('passenger456', passenger_info)
+print(response_passenger)
+p= load_data(PASSENGER_DATA_FILE)
+print(p)
+passenger_info2 = {
+    'latitude': 4.0583,
+    'longitude': 9.7105,
+    'departure_lat': 4.0600,
+    'departure_long': 9.7100,
+    'arrival_lat': 4.0550,
+    'arrival_long': 10.7050
+}
+response_passenger = add_or_update_passenger('passenger456', passenger_info2)
+p= load_data(PASSENGER_DATA_FILE)
+
+print(p)```
